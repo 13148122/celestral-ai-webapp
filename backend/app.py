@@ -3,7 +3,7 @@ from flask_cors import CORS
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-import google.generativeai as genai
+from anthropic import Anthropic
 from elevenlabs.client import ElevenLabs
 import base64
 
@@ -14,13 +14,13 @@ CORS(app)  # Enable CORS for all routes
 
 # Get API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 if not OPENAI_API_KEY:
     print("Warning: OPENAI_API_KEY not found. Transcription will fail or use placeholder.")
-if not GEMINI_API_KEY:
-    print("Warning: GEMINI_API_KEY not found. LLM responses will be placeholders.")
+if not ANTHROPIC_API_KEY:
+    print("Warning: ANTHROPIC_API_KEY not found. LLM responses will be placeholders.")
 if not ELEVENLABS_API_KEY or ELEVENLABS_API_KEY == "your_elevenlabs_api_key_here":
     print("Warning: ELEVENLABS_API_KEY not found. TTS will be disabled.")
 
@@ -34,16 +34,15 @@ if OPENAI_API_KEY:
         print(f"Error configuring OpenAI: {e}")
         openai_client = None
 
-# Configure Gemini
-model = None
-if GEMINI_API_KEY:
+# Configure Claude
+anthropic_client = None
+if ANTHROPIC_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        print("Gemini 1.5 Flash Latest API configured successfully")
+        anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        print("Claude 3.5 Sonnet API configured successfully")
     except Exception as e:
-        print(f"Error configuring Gemini: {e}")
-        model = None
+        print(f"Error configuring Claude: {e}")
+        anthropic_client = None
 
 # Configure ElevenLabs
 elevenlabs_client = None
@@ -101,11 +100,11 @@ def process_audio():
         # transcribed_text remains "Error in transcription..."
     
     llm_response_text = "Placeholder LLM response."
-    if model and transcribed_text and not transcribed_text.startswith("Error") and not transcribed_text.startswith("OpenAI API key not configured"):
+    if anthropic_client and transcribed_text and not transcribed_text.startswith("Error") and not transcribed_text.startswith("OpenAI API key not configured"):
         try:
-            print(f"Sending to Gemini: {transcribed_text}")
+            print(f"Sending to Claude: {transcribed_text}")
             
-            prompt = f"""You are Celestral AI — the context layer of AI agents.
+            system_prompt = """You are Celestral AI — the context layer of AI agents.
 
 Your purpose is to capture, structure, and share the "why, what, and how" behind human and AI actions so every agent can think and act with context and continuity.
 
@@ -118,21 +117,28 @@ Core functions:
 
 Be concise, structured, and proactive — always surface what matters most and explain why it matters.
 
-You are the invisible intelligence that helps AI remember, understand, and act coherently.
+You are the invisible intelligence that helps AI remember, understand, and act coherently."""
 
-The user just said: "{transcribed_text}"
-
-Respond with structured context, extracting intent and key information:"""
-
-            response = model.generate_content(prompt)
-            llm_response_text = response.text
-            print(f"Gemini response: {llm_response_text}")
+            response = anthropic_client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"The user just said: \"{transcribed_text}\"\n\nRespond with structured context, extracting intent and key information:"
+                    }
+                ]
+            )
+            
+            llm_response_text = response.content[0].text
+            print(f"Claude response: {llm_response_text}")
             
         except Exception as e:
-            print(f"Error during Gemini call: {e}")
+            print(f"Error during Claude call: {e}")
             llm_response_text = "Sorry, I had trouble understanding that. Could you try rephrasing?"
-    elif not model:
-        print("Gemini model not available (e.g., API key missing). Using placeholder LLM response.")
+    elif not anthropic_client:
+        print("Claude model not available (e.g., API key missing). Using placeholder LLM response.")
         llm_response_text = f"(Placeholder) AI understood: '{transcribed_text}'. How can I help you reflect on that?"
     else: # Case where transcription failed
         llm_response_text = "I wasn't able to understand the audio. Could you please try speaking again?"
@@ -162,7 +168,7 @@ Respond with structured context, extracting intent and key information:"""
         "user_transcription": transcribed_text,
         "ai_response_text": llm_response_text,
         "ai_response_audio": ai_audio_base64,
-        "message": "Processed with OpenAI Whisper, Gemini, and ElevenLabs (or placeholders if API keys missing)"
+        "message": "Processed with OpenAI Whisper, Claude 3.5 Sonnet, and ElevenLabs (or placeholders if API keys missing)"
     }
 
     return jsonify(response_data)

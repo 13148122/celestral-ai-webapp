@@ -1,6 +1,6 @@
 Flask
 python-dotenv
 openai
-google-generativeai
+anthropic
 flask-cors
 elevenlabs 
