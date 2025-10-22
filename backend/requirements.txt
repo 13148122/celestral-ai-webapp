@@ -1,6 +1,6 @@
 Flask
 python-dotenv
-deepgram-sdk
+openai
 google-generativeai
 flask-cors
 elevenlabs 

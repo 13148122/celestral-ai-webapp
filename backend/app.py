@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
-from deepgram import DeepgramClient, PrerecordedOptions
+from openai import OpenAI
 import google.generativeai as genai
 from elevenlabs.client import ElevenLabs
 import base64
@@ -13,16 +13,26 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 # Get API keys from environment variables
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
-if not DEEPGRAM_API_KEY:
-    print("Warning: DEEPGRAM_API_KEY not found. Transcription will fail or use placeholder.")
+if not OPENAI_API_KEY:
+    print("Warning: OPENAI_API_KEY not found. Transcription will fail or use placeholder.")
 if not GEMINI_API_KEY:
     print("Warning: GEMINI_API_KEY not found. LLM responses will be placeholders.")
 if not ELEVENLABS_API_KEY or ELEVENLABS_API_KEY == "your_elevenlabs_api_key_here":
     print("Warning: ELEVENLABS_API_KEY not found. TTS will be disabled.")
+
+# Configure OpenAI
+openai_client = None
+if OPENAI_API_KEY:
+    try:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        print("OpenAI Whisper API configured successfully")
+    except Exception as e:
+        print(f"Error configuring OpenAI: {e}")
+        openai_client = None
 
 # Configure Gemini
 model = None
@@ -66,28 +76,32 @@ def process_audio():
         print("No selected audio file")
         return jsonify({"error": "No selected audio file"}), 400
 
-    transcribed_text = "Error in transcription or Deepgram API key not set."
+    transcribed_text = "Error in transcription or OpenAI API key not set."
     try:
-        if DEEPGRAM_API_KEY:
-            deepgram = DeepgramClient(DEEPGRAM_API_KEY)
-            buffer_data = audio_file.read()
-            payload = {"buffer": buffer_data}
-            options = PrerecordedOptions(model="nova-2", smart_format=True)
+        if openai_client:
+            print("Sending audio to OpenAI Whisper...")
+            # Save audio file temporarily for OpenAI API
+            audio_file.seek(0)  # Reset file pointer
             
-            print("Sending audio to Deepgram...")
-            response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
-            transcribed_text = response.results.channels[0].alternatives[0].transcript
+            # OpenAI Whisper API accepts file-like objects directly
+            response = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+            
+            transcribed_text = response
             print(f"Transcription successful: {transcribed_text}")
         else:
-            print("DEEPGRAM_API_KEY is not set. Skipping transcription.")
-            transcribed_text = "Deepgram API key not configured. User speech not processed."
+            print("OPENAI_API_KEY is not set. Skipping transcription.")
+            transcribed_text = "OpenAI API key not configured. User speech not processed."
 
     except Exception as e:
-        print(f"Error during Deepgram transcription: {e}")
+        print(f"Error during OpenAI Whisper transcription: {e}")
         # transcribed_text remains "Error in transcription..."
     
     llm_response_text = "Placeholder LLM response."
-    if model and transcribed_text and not transcribed_text.startswith("Error") and not transcribed_text.startswith("Deepgram API key not configured"):
+    if model and transcribed_text and not transcribed_text.startswith("Error") and not transcribed_text.startswith("OpenAI API key not configured"):
         try:
             print(f"Sending to Gemini: {transcribed_text}")
             
@@ -137,7 +151,7 @@ Based on this, what is a thoughtful and encouraging response? If they mentioned 
         "user_transcription": transcribed_text,
         "ai_response_text": llm_response_text,
         "ai_response_audio": ai_audio_base64,
-        "message": "Processed with Deepgram, Gemini, and ElevenLabs (or placeholders if API keys missing)"
+        "message": "Processed with OpenAI Whisper, Gemini, and ElevenLabs (or placeholders if API keys missing)"
     }
 
     return jsonify(response_data)
