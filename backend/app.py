@@ -79,14 +79,17 @@ def process_audio():
     try:
         if openai_client:
             print("Sending audio to OpenAI Whisper...")
-            # Save audio file temporarily for OpenAI API
-            audio_file.seek(0)  # Reset file pointer
+            # Reset file pointer to beginning
+            audio_file.seek(0)
             
             # OpenAI Whisper API accepts file-like objects directly
+            # Optimized for conversation transcription with proper formatting
             response = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
-                response_format="text"
+                response_format="text",
+                language="en",  # Specify language for better accuracy in conversations
+                prompt="This is a recorded conversation. Transcribe with proper punctuation, capitalization, and speaker context."
             )
             
             transcribed_text = response
