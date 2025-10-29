@@ -6,6 +6,8 @@ from openai import OpenAI
 from anthropic import Anthropic
 from elevenlabs.client import ElevenLabs
 import base64
+from io import BytesIO
+import traceback
 
 load_dotenv()
 
@@ -65,8 +67,10 @@ def process_audio():
     """
     print("Received request for /process-audio")
 
+    # Check for audio file
     if 'audio' not in request.files:
         print("No audio file part in request.files")
+        print(f"Available keys in request.files: {list(request.files.keys())}")
         return jsonify({"error": "No audio file provided"}), 400
 
     audio_file = request.files['audio']
@@ -75,18 +79,45 @@ def process_audio():
         print("No selected audio file")
         return jsonify({"error": "No selected audio file"}), 400
 
+    # Check file size (Whisper API has 25MB limit)
+    audio_file.seek(0, 2)  # Seek to end
+    file_size = audio_file.tell()
+    audio_file.seek(0)  # Reset to beginning
+    
+    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+    if file_size > MAX_FILE_SIZE:
+        print(f"Audio file too large: {file_size} bytes")
+        return jsonify({
+            "error": f"Audio file too large. Max: 25MB, yours: {file_size/(1024*1024):.2f}MB"
+        }), 413
+    
+    print(f"Audio file received: {audio_file.filename}, size: {file_size} bytes")
+    
+    # Read audio content into memory
+    audio_content = audio_file.read()
+    audio_file.seek(0)
+
     transcribed_text = "Error in transcription or OpenAI API key not set."
     try:
         if openai_client:
             print("Sending audio to OpenAI Whisper...")
-            # Reset file pointer to beginning
-            audio_file.seek(0)
+            
+            # Create BytesIO object with proper filename
+            audio_data = BytesIO(audio_content)
+            
+            # Ensure filename has proper extension for Whisper API
+            filename = audio_file.filename
+            if not any(filename.endswith(ext) for ext in ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm']):
+                filename = f"{filename}.webm"  # Default extension for web recordings
+            audio_data.name = filename
+            
+            print(f"Transcribing file: {filename}, size: {len(audio_content)} bytes")
             
             # OpenAI Whisper API accepts file-like objects directly
             # Optimized for conversation transcription with proper formatting
             response = openai_client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_file,
+                file=audio_data,
                 response_format="text",
                 language="en",  # Specify language for better accuracy in conversations
                 prompt="This is a recorded conversation. Transcribe with proper punctuation, capitalization, and speaker context."
@@ -100,7 +131,8 @@ def process_audio():
 
     except Exception as e:
         print(f"Error during OpenAI Whisper transcription: {e}")
-        # transcribed_text remains "Error in transcription..."
+        print(f"Full traceback: {traceback.format_exc()}")
+        transcribed_text = f"Error in transcription: {str(e)}"
     
     llm_response_text = "Placeholder LLM response."
     if anthropic_client and transcribed_text and not transcribed_text.startswith("Error") and not transcribed_text.startswith("OpenAI API key not configured"):
