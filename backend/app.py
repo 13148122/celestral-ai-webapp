@@ -41,7 +41,7 @@ anthropic_client = None
 if ANTHROPIC_API_KEY:
     try:
         anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        print("Claude 3.5 Sonnet API configured successfully")
+        print("Claude 3 Opus API configured successfully")
     except Exception as e:
         print(f"Error configuring Claude: {e}")
         anthropic_client = None
@@ -155,7 +155,7 @@ Be concise, structured, and proactive — always surface what matters most and e
 You are the invisible intelligence that helps AI remember, understand, and act coherently."""
 
             response = anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-3-opus-20240229",  # Using Claude 3 Opus (most powerful model)
                 max_tokens=1024,
                 system=system_prompt,
                 messages=[
@@ -203,7 +203,7 @@ You are the invisible intelligence that helps AI remember, understand, and act c
         "user_transcription": transcribed_text,
         "ai_response_text": llm_response_text,
         "ai_response_audio": ai_audio_base64,
-        "message": "Processed with OpenAI Whisper, Claude 3.5 Sonnet, and ElevenLabs (or placeholders if API keys missing)"
+        "message": "Processed with OpenAI Whisper, Claude 3 Opus, and ElevenLabs (or placeholders if API keys missing)"
     }
 
     return jsonify(response_data)
