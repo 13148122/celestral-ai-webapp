@@ -177,20 +177,18 @@ def process_audio():
         if openai_client:
             print("Sending audio to OpenAI Whisper...")
             
-            # Create BytesIO object with proper filename
-            audio_data = BytesIO(audio_content)
-            
             # Ensure filename has proper extension for Whisper API
             filename = audio_file.filename
             if not any(filename.endswith(ext) for ext in ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm']):
                 filename = f"{filename}.webm"  # Default extension for web recordings
-            audio_data.name = filename
             
             print(f"Original file: {filename}, size: {len(audio_content)} bytes")
             
             # OPTIMIZATION 1 & 2: Compress audio and remove silence
-            audio_file.seek(0)
-            optimized_audio = optimize_audio_for_whisper(audio_file)
+            # Create BytesIO object from audio content for optimization
+            audio_data = BytesIO(audio_content)
+            audio_data.name = filename
+            optimized_audio = optimize_audio_for_whisper(audio_data)
             
             # OpenAI Whisper API accepts file-like objects directly
             # OPTIMIZATION 3: Optimized API parameters for faster processing
