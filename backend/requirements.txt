@@ -3,4 +3,5 @@ python-dotenv
 openai
 anthropic
 flask-cors
-elevenlabs 
+elevenlabs
+pydub 

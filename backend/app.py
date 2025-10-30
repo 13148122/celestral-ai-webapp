@@ -8,6 +8,8 @@ from elevenlabs.client import ElevenLabs
 import base64
 from io import BytesIO
 import traceback
+from pydub import AudioSegment
+from pydub.silence import detect_nonsilent
 
 load_dotenv()
 
@@ -54,6 +56,79 @@ if ELEVENLABS_API_KEY and ELEVENLABS_API_KEY != "your_elevenlabs_api_key_here":
         print("ElevenLabs API configured successfully")
     except Exception as e:
         print(f"Error configuring ElevenLabs: {e}")
+
+def optimize_audio_for_whisper(audio_file):
+    """
+    Optimize audio file for faster Whisper processing
+    - Converts to mono
+    - Reduces sample rate to 16kHz (Whisper's internal rate)
+    - Compresses with lower bitrate
+    - Removes silence from beginning/end
+    
+    Returns: Optimized audio file (BytesIO object)
+    """
+    try:
+        print("Optimizing audio for faster processing...")
+        
+        # Read audio data
+        audio_data = audio_file.read()
+        audio_file.seek(0)
+        
+        # Load audio with pydub
+        audio = AudioSegment.from_file(BytesIO(audio_data))
+        
+        original_duration = len(audio) / 1000.0  # Duration in seconds
+        print(f"Original audio: {original_duration:.2f}s, {audio.frame_rate}Hz, {audio.channels} channel(s)")
+        
+        # 1. Remove silence from beginning and end (keeps long pauses in middle)
+        nonsilent_ranges = detect_nonsilent(
+            audio,
+            min_silence_len=1000,  # 1 second of silence
+            silence_thresh=-40,     # dB threshold for silence
+            seek_step=100          # Check every 100ms
+        )
+        
+        if nonsilent_ranges:
+            # Trim silence from start and end only
+            start_trim = nonsilent_ranges[0][0]
+            end_trim = nonsilent_ranges[-1][1]
+            audio = audio[start_trim:end_trim]
+            
+            trimmed_duration = len(audio) / 1000.0
+            print(f"Trimmed silence: {original_duration - trimmed_duration:.2f}s removed")
+        
+        # 2. Convert to mono (if stereo)
+        if audio.channels > 1:
+            audio = audio.set_channels(1)
+            print("Converted to mono")
+        
+        # 3. Reduce sample rate to 16kHz (Whisper uses 16kHz internally)
+        if audio.frame_rate != 16000:
+            audio = audio.set_frame_rate(16000)
+            print(f"Resampled to 16kHz")
+        
+        # 4. Export with compression
+        optimized = BytesIO()
+        audio.export(
+            optimized,
+            format="mp3",
+            bitrate="32k",  # Lower bitrate for smaller file
+            parameters=["-ac", "1"]  # Ensure mono
+        )
+        optimized.seek(0)
+        optimized.name = "optimized.mp3"
+        
+        final_size = len(optimized.getvalue()) / 1024  # Size in KB
+        print(f"Optimized audio: {final_size:.2f}KB, ready for Whisper")
+        
+        return optimized
+        
+    except Exception as e:
+        print(f"Error optimizing audio: {e}")
+        print("Falling back to original audio file")
+        audio_file.seek(0)
+        return audio_file
+
 
 @app.route('/')
 def home():
@@ -111,16 +186,20 @@ def process_audio():
                 filename = f"{filename}.webm"  # Default extension for web recordings
             audio_data.name = filename
             
-            print(f"Transcribing file: {filename}, size: {len(audio_content)} bytes")
+            print(f"Original file: {filename}, size: {len(audio_content)} bytes")
+            
+            # OPTIMIZATION 1 & 2: Compress audio and remove silence
+            audio_file.seek(0)
+            optimized_audio = optimize_audio_for_whisper(audio_file)
             
             # OpenAI Whisper API accepts file-like objects directly
-            # Optimized for conversation transcription with proper formatting
+            # OPTIMIZATION 3: Optimized API parameters for faster processing
             response = openai_client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_data,
-                response_format="text",
-                language="en",  # Specify language for better accuracy in conversations
-                prompt="This is a recorded conversation. Transcribe with proper punctuation, capitalization, and speaker context."
+                file=optimized_audio,
+                response_format="text",  # Faster than JSON/verbose_json
+                language="en",           # Skips language detection = faster
+                temperature=0            # Deterministic output = faster, more consistent
             )
             
             transcribed_text = response
