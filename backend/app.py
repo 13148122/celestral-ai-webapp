@@ -10,6 +10,8 @@ from io import BytesIO
 import traceback
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
+from deepgram import DeepgramClient, PrerecordedOptions
+import asyncio
 
 load_dotenv()
 
@@ -20,6 +22,7 @@ CORS(app)  # Enable CORS for all routes
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 if not OPENAI_API_KEY:
     print("Warning: OPENAI_API_KEY not found. Transcription will fail or use placeholder.")
@@ -27,6 +30,8 @@ if not ANTHROPIC_API_KEY:
     print("Warning: ANTHROPIC_API_KEY not found. LLM responses will be placeholders.")
 if not ELEVENLABS_API_KEY or ELEVENLABS_API_KEY == "your_elevenlabs_api_key_here":
     print("Warning: ELEVENLABS_API_KEY not found. TTS will be disabled.")
+if not DEEPGRAM_API_KEY:
+    print("Warning: DEEPGRAM_API_KEY not found. Speaker diarization will be disabled.")
 
 # Configure OpenAI
 openai_client = None
@@ -56,6 +61,16 @@ if ELEVENLABS_API_KEY and ELEVENLABS_API_KEY != "your_elevenlabs_api_key_here":
         print("ElevenLabs API configured successfully")
     except Exception as e:
         print(f"Error configuring ElevenLabs: {e}")
+
+# Configure Deepgram
+deepgram_client = None
+if DEEPGRAM_API_KEY:
+    try:
+        deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
+        print("Deepgram API configured successfully")
+    except Exception as e:
+        print(f"Error configuring Deepgram: {e}")
+        deepgram_client = None
 
 def optimize_audio_for_whisper(audio_file):
     """
@@ -130,6 +145,142 @@ def optimize_audio_for_whisper(audio_file):
         return audio_file
 
 
+def merge_transcription_with_speakers(whisper_response, deepgram_response):
+    """
+    Align Whisper transcription with Deepgram speaker segments
+    Returns: (formatted_text, speaker_count)
+    """
+    try:
+        # Extract Deepgram speaker segments
+        dg_words = deepgram_response.results.channels[0].alternatives[0].words
+        
+        if not dg_words:
+            return None, 0
+        
+        # Group words by speaker
+        speaker_segments = []
+        current_speaker = None
+        current_text = []
+        
+        for word in dg_words:
+            speaker = word.speaker
+            
+            if speaker != current_speaker:
+                # Save previous segment
+                if current_speaker is not None and current_text:
+                    speaker_segments.append({
+                        'speaker': current_speaker,
+                        'text': ' '.join(current_text).strip()
+                    })
+                
+                # Start new segment
+                current_speaker = speaker
+                current_text = [word.word]
+            else:
+                current_text.append(word.word)
+        
+        # Add final segment
+        if current_speaker is not None and current_text:
+            speaker_segments.append({
+                'speaker': current_speaker,
+                'text': ' '.join(current_text).strip()
+            })
+        
+        # Format output
+        formatted_lines = []
+        for segment in speaker_segments:
+            speaker_label = f"Speaker {segment['speaker']}"
+            formatted_lines.append(f"{speaker_label}: {segment['text']}")
+        
+        formatted_text = '\n'.join(formatted_lines)
+        
+        # Count unique speakers
+        unique_speakers = len(set(segment['speaker'] for segment in speaker_segments))
+        
+        print(f"Diarization complete: {unique_speakers} speaker(s) detected")
+        return formatted_text, unique_speakers
+        
+    except Exception as e:
+        print(f"Error merging transcription with speakers: {e}")
+        return None, 0
+
+
+async def process_audio_parallel(audio_content, filename):
+    """
+    Run Whisper transcription and Deepgram diarization in parallel
+    Returns: (whisper_response, deepgram_response)
+    """
+    async def run_whisper():
+        """Run Whisper transcription with timestamps"""
+        try:
+            print("Starting Whisper transcription...")
+            # Create optimized audio
+            audio_data = BytesIO(audio_content)
+            audio_data.name = filename
+            optimized_audio = optimize_audio_for_whisper(audio_data)
+            
+            # Call Whisper with verbose_json for timestamps
+            response = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=optimized_audio,
+                response_format="verbose_json",  # Get word timestamps
+                language="en",
+                temperature=0,
+                timestamp_granularities=["word"]
+            )
+            print("Whisper transcription complete")
+            return response
+        except Exception as e:
+            print(f"Error in Whisper transcription: {e}")
+            return None
+    
+    async def run_deepgram():
+        """Run Deepgram diarization"""
+        try:
+            print("Starting Deepgram diarization...")
+            
+            # Deepgram options
+            options = PrerecordedOptions(
+                model="nova-2",
+                diarize=True,
+                punctuate=False,  # Whisper handles punctuation
+                language="en",
+                smart_format=False
+            )
+            
+            # Prepare audio payload
+            payload = {
+                "buffer": audio_content
+            }
+            
+            # Call Deepgram
+            response = deepgram_client.listen.prerecorded.v("1").transcribe_file(
+                payload,
+                options
+            )
+            print("Deepgram diarization complete")
+            return response
+        except Exception as e:
+            print(f"Error in Deepgram diarization: {e}")
+            return None
+    
+    # Run both in parallel
+    whisper_task = run_whisper()
+    deepgram_task = run_deepgram() if deepgram_client else None
+    
+    if deepgram_task:
+        whisper_result, deepgram_result = await asyncio.gather(
+            whisper_task,
+            deepgram_task,
+            return_exceptions=True
+        )
+    else:
+        whisper_result = await whisper_task
+        deepgram_result = None
+    
+    return whisper_result, deepgram_result
+
+
 @app.route('/')
 def home():
     return "Celestral AI Backend is running!"
@@ -172,42 +323,54 @@ def process_audio():
     audio_content = audio_file.read()
     audio_file.seek(0)
 
+    # Ensure filename has proper extension
+    filename = audio_file.filename
+    if not any(filename.endswith(ext) for ext in ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm']):
+        filename = f"{filename}.webm"  # Default extension for web recordings
+    
+    print(f"Original file: {filename}, size: {len(audio_content)} bytes")
+    
+    # Run Whisper and Deepgram in parallel
     transcribed_text = "Error in transcription or OpenAI API key not set."
+    speaker_transcription = None
+    speaker_count = 0
+    
     try:
         if openai_client:
-            print("Sending audio to OpenAI Whisper...")
+            print("Processing audio with Whisper and Deepgram in parallel...")
             
-            # Ensure filename has proper extension for Whisper API
-            filename = audio_file.filename
-            if not any(filename.endswith(ext) for ext in ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm']):
-                filename = f"{filename}.webm"  # Default extension for web recordings
-            
-            print(f"Original file: {filename}, size: {len(audio_content)} bytes")
-            
-            # OPTIMIZATION 1 & 2: Compress audio and remove silence
-            # Create BytesIO object from audio content for optimization
-            audio_data = BytesIO(audio_content)
-            audio_data.name = filename
-            optimized_audio = optimize_audio_for_whisper(audio_data)
-            
-            # OpenAI Whisper API accepts file-like objects directly
-            # OPTIMIZATION 3: Optimized API parameters for faster processing
-            response = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=optimized_audio,
-                response_format="text",  # Faster than JSON/verbose_json
-                language="en",           # Skips language detection = faster
-                temperature=0            # Deterministic output = faster, more consistent
+            # Run parallel processing
+            whisper_result, deepgram_result = asyncio.run(
+                process_audio_parallel(audio_content, filename)
             )
             
-            transcribed_text = response
-            print(f"Transcription successful: {transcribed_text}")
+            # Extract Whisper transcription
+            if whisper_result:
+                transcribed_text = whisper_result.text
+                print(f"Transcription successful: {transcribed_text}")
+                
+                # Merge with Deepgram diarization if available
+                if deepgram_result and deepgram_client:
+                    speaker_transcription, speaker_count = merge_transcription_with_speakers(
+                        whisper_result,
+                        deepgram_result
+                    )
+                    
+                    if speaker_transcription:
+                        print(f"Speaker diarization successful: {speaker_count} speaker(s)")
+                    else:
+                        print("Speaker diarization failed, using transcription only")
+                else:
+                    print("Deepgram not configured, skipping diarization")
+            else:
+                transcribed_text = "Error in transcription"
+                print("Whisper transcription failed")
         else:
             print("OPENAI_API_KEY is not set. Skipping transcription.")
             transcribed_text = "OpenAI API key not configured. User speech not processed."
 
     except Exception as e:
-        print(f"Error during OpenAI Whisper transcription: {e}")
+        print(f"Error during audio processing: {e}")
         print(f"Full traceback: {traceback.format_exc()}")
         transcribed_text = f"Error in transcription: {str(e)}"
     
@@ -278,9 +441,11 @@ You are the invisible intelligence that helps AI remember, understand, and act c
 
     response_data = {
         "user_transcription": transcribed_text,
+        "speaker_transcription": speaker_transcription,
+        "speaker_count": speaker_count,
         "ai_response_text": llm_response_text,
         "ai_response_audio": ai_audio_base64,
-        "message": "Processed with OpenAI Whisper, Claude 3 Opus, and ElevenLabs (or placeholders if API keys missing)"
+        "message": "Processed with OpenAI Whisper, Deepgram diarization, Claude 3 Opus, and ElevenLabs (or placeholders if API keys missing)"
     }
 
     return jsonify(response_data)

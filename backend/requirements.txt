@@ -4,4 +4,5 @@ openai
 anthropic
 flask-cors
 elevenlabs
-pydub 
+pydub
+deepgram-sdk 
