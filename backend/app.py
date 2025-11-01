@@ -253,8 +253,8 @@ async def process_audio_parallel(audio_content, filename):
                 "buffer": audio_content
             }
             
-            # Call Deepgram
-            response = deepgram_client.listen.prerecorded.v("1").transcribe_file(
+            # Call Deepgram (using new REST API)
+            response = deepgram_client.listen.rest.v("1").transcribe_file(
                 payload,
                 options
             )
